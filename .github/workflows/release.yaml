@@ -33,7 +33,7 @@ jobs:
       - name: Prepare
         id: prepare
         run: |
-          DOCKER_IMAGE=ghcr.io/lizeeen/grafana-proxy
+          DOCKER_IMAGE=ghcr.io/tianniu-rd/grafana-proxy
           DOCKER_PLATFORMS=linux/amd64,linux/arm64
           VERSION=canary
           if [[ $GITHUB_REF == refs/tags/* ]]; then
