@@ -211,7 +211,6 @@ func (p proxy) loginProxy(requestLog *log.Entry, res http.ResponseWriter, r *htt
 		}
 	}
 	res.Header().Add("Access-Control-Allow-Credentials", "true")
-	res.Header().Add("Access-Control-Allow-Origin", "http://localhost:8080")
 
 	res.WriteHeader(resp.StatusCode)
 	io.Copy(res, resp.Body)
