@@ -6,8 +6,9 @@ ADD . /go/src/github.com/Luzifer/grafana-proxy
 WORKDIR /go/src/github.com/Luzifer/grafana-proxy
 
 RUN set -ex \
+ # && sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
  && apk add --update git \
-# && export GOPROXY=https://proxy.golang.com.cn,direct \
+ # && export GOPROXY=https://proxy.golang.com.cn,direct \
  && go mod tidy \
  && go install -ldflags "-X main.version=$(git describe --tags || git rev-parse --short HEAD || echo dev)" \
  && apk del --purge git

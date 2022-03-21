@@ -31,7 +31,8 @@ var (
 		Token     string `flag:"token" default:"" env:"TOKEN" description:"(optional) require a ?token=xyz parameter to show the dashboard"`
 		LogFormat string `flag:"log-format" default:"text" env:"LOG_FORMAT" description:"Output format for logs (text/json)"`
 	}{}
-	base *url.URL
+	base           *url.URL
+	grafanaSession string
 )
 
 func init() {
@@ -64,19 +65,35 @@ func init() {
 
 // removeGrafanaSession 删除当前请求中的grafana session
 func removeGrafanaSession(header *http.Header) {
-	if header != nil {
-		cookie := header.Values("Cookie")
-		header.Del("Cookie")
-		for _, h := range cookie {
-			if !strings.Contains(h, GrafanaSession) {
-				header.Add("Cookie", h)
-			}
+	cookie := header.Values("Cookie")
+	header.Del("Cookie")
+	for _, h := range cookie {
+		if !strings.Contains(h, GrafanaSession) {
+			header.Add("Cookie", h)
+		}
+	}
+}
+
+func addGrafanaSession(res http.ResponseWriter, r *http.Request) {
+	cookie := r.Header.Values("Cookie")
+	for _, h := range cookie {
+		if strings.Contains(h, GrafanaSession) {
+			return
+		}
+	}
+	if grafanaSession != "" {
+		r.Header.Add("Cookie", grafanaSession)
+	} else {
+		err := loadLogin(res, r)
+		if err != nil {
+			log.WithError(err).Error("Login failed")
 		}
 	}
 }
 
 // loadLogin 登录grafana，获取session，并放到request当前请求中
-func loadLogin(ctx context.Context, r *http.Request) (string, error) {
+func loadLogin(res http.ResponseWriter, r *http.Request) error {
+	grafanaSession = ""
 	loginBody, _ := json.Marshal(map[string]string{
 		"user":     cfg.User,
 		"password": cfg.Pass,
@@ -85,27 +102,28 @@ func loadLogin(ctx context.Context, r *http.Request) (string, error) {
 	resp, err := http.DefaultClient.Post(cfg.BaseURL+"/login", "application/json", body)
 	if err != nil {
 		log.WithError(err).WithFields(log.Fields{
-			"user":       cfg.User,
-			"request_id": requestIDFromContext(ctx),
+			"user": cfg.User,
 		}).Error("Login failed")
-		return "", err
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		loginRes, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
-			return "", err
+			return err
 		}
-		return "", errors.New(string(loginRes))
+		return errors.New(string(loginRes))
 	}
 	removeGrafanaSession(&r.Header)
 	for _, c := range resp.Header.Values("Set-Cookie") {
 		if strings.Contains(c, GrafanaSession) {
 			r.Header.Add("Cookie", c)
-			return c, nil
+			res.Header().Add("Set-Cookie", c)
+			grafanaSession = c
+			return nil
 		}
 	}
-	return "", errors.New("not found grafana session after login")
+	return errors.New("not found grafana session after login")
 }
 
 // redirectLogin 判断请求返回是否认证失败或者重定向到登录页面
@@ -146,8 +164,8 @@ func (p proxy) originProxy(requestLog *log.Entry, res http.ResponseWriter, r *ht
 	}
 }
 
-func (p proxy) loginProxy(ctx context.Context, requestLog *log.Entry, res http.ResponseWriter, r *http.Request) {
-
+func (p proxy) loginProxy(requestLog *log.Entry, res http.ResponseWriter, r *http.Request) {
+	addGrafanaSession(res, r)
 	resp, err := http.DefaultTransport.RoundTrip(r)
 	if err != nil {
 		requestLog.WithError(err).Error("Request failed")
@@ -163,12 +181,9 @@ func (p proxy) loginProxy(ctx context.Context, requestLog *log.Entry, res http.R
 		}).Info("Unauthorized, trying to login")
 		resp.Body.Close()
 
-		session, err := loadLogin(ctx, r)
+		err = loadLogin(res, r)
 		if err != nil {
 			requestLog.WithError(err).Error("login error")
-		}
-		if session != "" {
-			res.Header().Add("Set-Cookie", session)
 		}
 
 		resp, err = http.DefaultTransport.RoundTrip(r)
@@ -181,10 +196,13 @@ func (p proxy) loginProxy(ctx context.Context, requestLog *log.Entry, res http.R
 
 	if r.URL.Query().Get("token") != "" {
 		http.SetCookie(res, &http.Cookie{
-			Name:   "grafana-proxy-auth",
-			Value:  r.URL.Query().Get("token"),
-			MaxAge: 31536000, // 1 Year
-			Path:   "/",
+			Name:     "grafana-proxy-auth",
+			Value:    r.URL.Query().Get("token"),
+			MaxAge:   31536000, // 1 Year
+			Path:     "/",
+			HttpOnly: true,
+			//Secure: true,
+			//SameSite: http.SameSiteNoneMode,
 		})
 	}
 	for k, v := range resp.Header {
@@ -192,6 +210,8 @@ func (p proxy) loginProxy(ctx context.Context, requestLog *log.Entry, res http.R
 			res.Header().Add(k, v1)
 		}
 	}
+	res.Header().Add("Access-Control-Allow-Credentials", "true")
+	res.Header().Add("Access-Control-Allow-Origin", "http://localhost:8080")
 
 	res.WriteHeader(resp.StatusCode)
 	io.Copy(res, resp.Body)
@@ -210,16 +230,21 @@ func (p proxy) ServeHTTP(res http.ResponseWriter, r *http.Request) {
 		"request_full":    r.URL.String(),
 		"request_method":  r.Method,
 		"request_id":      requestIDFromContext(ctx),
+		"referer":         r.Referer(),
 	})
 	r.URL.Host = base.Host
 	r.URL.Scheme = base.Scheme
 	r.RequestURI = ""
 	r.Host = base.Host
 	r.Header.Set("Origin", cfg.BaseURL)
+	referer, _ := url.Parse(r.Referer())
 
 	suppliedToken := ""
 	if authCookie, err := r.Cookie("grafana-proxy-auth"); err == nil {
 		suppliedToken = authCookie.Value
+	}
+	if suppliedToken == "" && referer.Query().Get("token") != "" {
+		suppliedToken = referer.Query().Get("token")
 	}
 	if token := r.URL.Query().Get("token"); token != "" {
 		suppliedToken = token
@@ -235,7 +260,7 @@ func (p proxy) ServeHTTP(res http.ResponseWriter, r *http.Request) {
 		http.Error(res, "Token authorized error", http.StatusForbidden)
 		return
 	}
-	p.loginProxy(ctx, requestLog, res, r)
+	p.loginProxy(requestLog, res, r)
 }
 
 func requestIDFromContext(ctx context.Context) string {
