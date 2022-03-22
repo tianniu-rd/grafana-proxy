@@ -61,6 +61,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Docker Buildx (push)
-        run: |
-          docker buildx build --output "type=image,push=true" ${{ steps.prepare.outputs.buildx_args }}
+      - name: Build and push
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/tianniu-rd/grafana-proxy:${{ steps.prepare.outputs.version }}
+#      - name: Docker Buildx (push)
+#        run: |
+#          docker buildx build --output "type=image,push=true" ${{ steps.prepare.outputs.buildx_args }}
